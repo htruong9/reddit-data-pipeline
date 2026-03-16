@@ -1,0 +1,232 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Reddit Data Pipeline — S3 buckets, Glue resources, Athena workgroup,
+  and a Redshift cluster.
+
+# ====================================================================
+# Parameters
+# ====================================================================
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+  RawBucketName:
+    Type: String
+    Default: reddit-pipeline-raw
+  TransformedBucketName:
+    Type: String
+    Default: reddit-pipeline-transformed
+  GlueScriptsBucket:
+    Type: String
+    Default: reddit-pipeline-glue-scripts
+  GlueDatabaseName:
+    Type: String
+    Default: reddit_db
+  RedshiftMasterUser:
+    Type: String
+    Default: admin
+    NoEcho: true
+  RedshiftMasterPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+  RedshiftNodeType:
+    Type: String
+    Default: dc2.large
+  RedshiftNumberOfNodes:
+    Type: Number
+    Default: 1
+
+# ====================================================================
+# Resources
+# ====================================================================
+Resources:
+
+  # -----------------------------------------------------------------
+  # S3 Buckets
+  # -----------------------------------------------------------------
+  RawBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${RawBucketName}-${Environment}"
+      LifecycleConfiguration:
+        Rules:
+          - Id: ArchiveOldRaw
+            Status: Enabled
+            Transitions:
+              - StorageClass: GLACIER
+                TransitionInDays: 90
+
+  TransformedBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${TransformedBucketName}-${Environment}"
+
+  GlueScriptsBucketResource:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${GlueScriptsBucket}-${Environment}"
+
+  # -----------------------------------------------------------------
+  # IAM Roles
+  # -----------------------------------------------------------------
+  GlueServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "RedditPipelineGlueRole-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt RawBucket.Arn
+                  - !Sub "${RawBucket.Arn}/*"
+                  - !GetAtt TransformedBucket.Arn
+                  - !Sub "${TransformedBucket.Arn}/*"
+                  - !GetAtt GlueScriptsBucketResource.Arn
+                  - !Sub "${GlueScriptsBucketResource.Arn}/*"
+
+  RedshiftServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "RedditPipelineRedshiftRole-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: redshift.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3ReadAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt TransformedBucket.Arn
+                  - !Sub "${TransformedBucket.Arn}/*"
+
+  # -----------------------------------------------------------------
+  # Glue Database + Crawler + ETL Job
+  # -----------------------------------------------------------------
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Ref GlueDatabaseName
+        Description: Reddit pipeline data catalogue
+
+  GlueCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub "reddit-crawler-${Environment}"
+      Role: !GetAtt GlueServiceRole.Arn
+      DatabaseName: !Ref GlueDatabaseName
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${RawBucketName}-${Environment}/raw/"
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+      Schedule:
+        ScheduleExpression: "cron(30 6 * * ? *)"
+    DependsOn: GlueDatabase
+
+  GlueETLJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub "reddit-transform-job-${Environment}"
+      Role: !GetAtt GlueServiceRole.Arn
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub "s3://${GlueScriptsBucket}-${Environment}/scripts/transform_reddit.py"
+        PythonVersion: "3"
+      DefaultArguments:
+        "--source_bucket": !Sub "${RawBucketName}-${Environment}"
+        "--target_bucket": !Sub "${TransformedBucketName}-${Environment}"
+        "--glue_database": !Ref GlueDatabaseName
+        "--job-bookmark-option": "job-bookmark-enable"
+      GlueVersion: "4.0"
+      NumberOfWorkers: 2
+      WorkerType: G.1X
+      Timeout: 60
+
+  # -----------------------------------------------------------------
+  # Athena Workgroup
+  # -----------------------------------------------------------------
+  AthenaWorkgroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub "reddit-workgroup-${Environment}"
+      State: ENABLED
+      WorkGroupConfiguration:
+        ResultConfiguration:
+          OutputLocation: !Sub "s3://${TransformedBucketName}-${Environment}/athena-results/"
+
+  # -----------------------------------------------------------------
+  # Redshift Cluster
+  # -----------------------------------------------------------------
+  RedshiftCluster:
+    Type: AWS::Redshift::Cluster
+    Properties:
+      ClusterIdentifier: !Sub "reddit-cluster-${Environment}"
+      ClusterType: !If
+        - IsSingleNode
+        - single-node
+        - multi-node
+      NodeType: !Ref RedshiftNodeType
+      NumberOfNodes: !If
+        - IsSingleNode
+        - !Ref AWS::NoValue
+        - !Ref RedshiftNumberOfNodes
+      DBName: reddit_analytics
+      MasterUsername: !Ref RedshiftMasterUser
+      MasterUserPassword: !Ref RedshiftMasterPassword
+      IamRoles:
+        - !GetAtt RedshiftServiceRole.Arn
+      PubliclyAccessible: false
+      Encrypted: true
+
+# ====================================================================
+# Conditions
+# ====================================================================
+Conditions:
+  IsSingleNode: !Equals [!Ref RedshiftNumberOfNodes, 1]
+
+# ====================================================================
+# Outputs
+# ====================================================================
+Outputs:
+  RawBucketArn:
+    Value: !GetAtt RawBucket.Arn
+  TransformedBucketArn:
+    Value: !GetAtt TransformedBucket.Arn
+  GlueDatabaseName:
+    Value: !Ref GlueDatabaseName
+  RedshiftClusterEndpoint:
+    Value: !GetAtt RedshiftCluster.Endpoint.Address
+  RedshiftIamRoleArn:
+    Value: !GetAtt RedshiftServiceRole.Arn
+  AthenaWorkgroupName:
+    Value: !Ref AthenaWorkgroup

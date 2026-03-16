@@ -1,0 +1,27 @@
+[reddit]
+client_id = YOUR_REDDIT_CLIENT_ID
+client_secret = YOUR_REDDIT_CLIENT_SECRET
+user_agent = RedditDataPipeline/1.0
+subreddit = dataengineering
+post_limit = 100
+time_filter = day
+
+[aws]
+access_key = YOUR_AWS_ACCESS_KEY
+secret_key = YOUR_AWS_SECRET_KEY
+region = eu-west-2
+s3_bucket_raw = reddit-pipeline-raw
+s3_bucket_transformed = reddit-pipeline-transformed
+glue_database = reddit_db
+glue_crawler = reddit_crawler
+glue_job = reddit_transform_job
+redshift_cluster = reddit-cluster
+redshift_database = reddit_analytics
+redshift_user = admin
+redshift_password = YOUR_REDSHIFT_PASSWORD
+redshift_port = 5439
+redshift_iam_role = arn:aws:iam::ACCOUNT_ID:role/RedshiftS3ReadRole
+
+[airflow]
+username = airflow
+password = airflow
