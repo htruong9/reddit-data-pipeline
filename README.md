@@ -67,7 +67,7 @@ Reddit API
 1. **Clone and enter the repository**
 
    ```bash
-   git clone <your-repo-url>
+   git clone https://github.com/htruong9/reddit-data-pipeline.git
    cd reddit-data-pipeline
    ```
 
@@ -220,6 +220,3 @@ redshift_iam_role = arn:aws:iam::ACCOUNT_ID:role/RedshiftS3ReadRole
 * **CloudWatch** — Glue job metrics, S3 request metrics, Redshift query performance
 * **Athena Query History** — transformation audit trail
 
-## Licence
-
-MIT
